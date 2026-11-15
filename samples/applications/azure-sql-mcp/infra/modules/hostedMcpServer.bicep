@@ -7,7 +7,7 @@ param connectorNamespaceName string
 param name string
 
 @sys.description('Description shown to MCP clients.')
-param mcpServerDescription string = 'SQL MCP server bound to DAB config with managed identity.'
+param mcpServerDescription string = 'Read-only SQL MCP server bound to configured entities in an existing database.'
 
 @sys.description('Object ID of the deployer user to grant MCP access.')
 param deployerPrincipalId string

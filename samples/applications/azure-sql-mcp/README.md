@@ -1,33 +1,52 @@
 ![](../../../media/solutions-microsoft-logo-small.png)
 
-# Hosted MCP in Connector Namespace — Azure SQL Database
+# Hosted SQL MCP in Connector Namespace -- use an existing database
 
-This sample deploys a hosted Model Context Protocol (MCP) server in [Azure Connector Namespace](https://learn.microsoft.com/azure/logic-apps/connector-namespace/connector-namespace-hosted-mcp), backed by Azure SQL Database. It uses [Azure Developer CLI](https://learn.microsoft.com/azure/developer/azure-developer-cli/) (`azd`) and Bicep to provision the infrastructure, seed a sample `dbo.BlogPosts` table through a post-provision SQL script, and configure managed identity access. After deployment, MCP clients such as GitHub Copilot in Visual Studio Code can query the database through the hosted MCP server.
+Deploy Microsoft's SQL MCP server (Data API builder) in **Azure Connector Namespace**, then connect Azure SRE Agent to your **existing SQL database**. Based on [Power Azure SRE Agent with the tools it needs](https://devblogs.microsoft.com/azure-sdk/power-azure-sre-agent-with-connector-namespace/).
 
-<a name=before-you-begin></a>
+**This sample creates MCP hosting, not SQL.** It does not create a SQL server/database, seed application data, change SQL administrators, execute SQL grants or open firewall rules. Your DBA controls the reader and which existing objects DAB exposes.
 
-## Before you begin
+## What can connect?
 
-To run this sample, you need the following prerequisites.
+| Existing database | Authentication | Network requirement |
+|---|---|---|
+| Azure SQL Database | Managed identity recommended; dedicated SQL login where permitted | An endpoint reachable from the hosted service with approved firewall access |
+| SQL Server on an Azure VM | Dedicated SQL login; managed identity only with configured SQL Server 2022+ Entra support | Reachable TCP endpoint and trusted SQL TLS certificate |
+| On-premises SQL Server, including Azure Arc-enabled servers | Dedicated SQL login; Entra configurations require separate verification | Reachable TCP endpoint and trusted SQL TLS certificate; **Arc does not tunnel SQL traffic** |
 
-**Software prerequisites:**
+**Preview boundary:** the catalog documents Azure SQL. SQL VM/on-premises connections use DAB's SQL Server driver but have not been end-to-end validated with this hosted catalog runtime. They are candidate configurations, not a certification of every SQL version or authentication mode.
 
-1. [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) (`az`)
-1. [Azure Developer CLI](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd) (`azd`)
-1. PowerShell 7+ on Windows, or Bash on Linux/macOS
-1. [Visual Studio Code](https://code.visualstudio.com/) with the [GitHub Copilot](https://marketplace.visualstudio.com/items?itemName=GitHub.copilot) extension (to connect to the deployed MCP server)
+[Connector Namespace documentation](https://learn.microsoft.com/azure/connector-namespace/connector-namespace-hosted-mcp) lists VNet/private-endpoint support as future work and does not recommend the preview for production. **Private-only SQL is not supported by this sample's documented hosting path.** Existing VPN, peering or Arc enrollment alone does not connect the hosted service to your network. Confirm capabilities with the service team before proceeding; do not expose private SQL to make this sample work.
 
-**Azure prerequisites:**
+## 1. Configure the existing database
 
-1. An Azure subscription with permissions to create resource groups and resources.
-1. Permission to create Azure SQL Database, Application Insights, Log Analytics workspace, and Connector Namespace resources.
-1. Permission to create an Azure SQL Database Microsoft Entra ID administrator for the signed-in user.
+Prerequisites: Azure Developer CLI (`azd`), hosting deployment permissions, an existing SQL database, a DBA-approved dedicated reader, and an approved SQL network path. The signed-in deployer's object ID is used only for the MCP access policy, never to change your SQL administrator.
 
-<a name=run-this-sample></a>
+Clone this repository and open `samples/applications/azure-sql-mcp`. Review `dab-config.json` before deployment:
 
-## Run this sample
+- It uses the hosted server's `SQL_CONNECTION_STRING`, not a checked-in credential.
+- The default `Tables` entity exposes **`sys.tables` metadata only**, with `object_id` as its key. It creates no SQL objects. Results are limited by the reader's SQL metadata visibility; an empty list is not proof of connectivity to application data.
+- To expose an existing business or diagnostic table/view, replace or add an entity's `source.object` and `source.type`. Views need stable unique `key-fields`. Grant `read` only on explicitly approved entities and matching SQL permissions.
+- REST, GraphQL and write/procedure tools are disabled. This is **not** the separate custom `sre_sql` diagnostics package: it installs no blocking views or stored procedures.
 
-From this folder:
+For example, an existing, DBA-approved view might be configured as:
+
+```json
+"OrderStatus": {
+  "source": {
+    "object": "reporting.OrderStatus",
+    "type": "view",
+    "key-fields": ["OrderId"]
+  },
+  "permissions": [
+    { "role": "anonymous", "actions": [{ "action": "read" }] }
+  ]
+}
+```
+
+`anonymous` is the DAB entity role used by this hosted configuration; **the Connector Namespace still enforces inbound Entra authentication and MCP access policies**. Do not deploy the config as an unprotected standalone endpoint.
+
+## 2. Deploy MCP hosting
 
 ```bash
 azd auth login
@@ -35,178 +54,90 @@ azd init
 azd up
 ```
 
-> **Cross-platform:** `azd up` works on Windows (runs the PowerShell post-provision hook), macOS, and Linux (runs the Bash post-provision hook). No additional tools are required beyond the prerequisites listed above. A standalone `deploy.ps1` script is also included as an alternative for PowerShell users.
+Choose **Use code in the current directory** in `azd init`, and an environment name such as `mcp-existing-sql`. Choose a supported preview region: **West Central US, Central US, East Asia or North Europe** (check current availability).
 
-#### `azd init` prompts
+| Parameter | What to supply |
+|---|---|
+| `environmentName` / subscription / `location` | New hosting environment name and target subscription/region; these do not select or move SQL |
+| `connectorNamespaceIdentityType` | Defaults to **UserAssigned**. To select SystemAssigned, change the infrastructure parameter before deployment |
+| `connectorNamespaceLocation` | Defaults to `location`; use a supported hosting region |
+| `sqlConnectionString` | Enter your existing database connection string at the **secure infrastructure prompt**; never an administrator credential |
 
-When you run `azd init` for the first time, it detects the existing `azure.yaml` and Bicep templates:
+Use the server's normal certificate-matching DNS name and actual SQL TCP port. Include **`Encrypt=True;TrustServerCertificate=False`**. The template accepts your connection string; it does not repair DNS, certificates or routing. Azure SQL private DNS hostnames do not circumvent the private-network limitation.
 
-1. **"How do you want to initialize your app?"** — Select **Use code in the current directory**.
-2. **"Confirm and continue initializing this app"** — Press **Enter** to confirm the detected services.
-3. **"Enter a new environment name"** — Pick any name, for example `mcp-dev`. This name is used as a prefix for Azure resource names.
+**Azure SQL, user-assigned managed identity (default):**
 
-You only need to run `azd init` once. Subsequent deployments only require `azd up`.
-
-#### `azd up` prompts
-
-When you run `azd up`, you are prompted for:
-
-- **Azure Subscription:** Select the Azure subscription to deploy to.
-- **Azure location:** Choose a supported region (e.g. `eastasia`, `westcentralus`).
-- **`deployerLoginName` infrastructure parameter:** Enter your Azure sign-in email or user principal name, for example `user@contoso.com`. If you don't know the value, run the following command in a different terminal instance and use the result:
-
-  ```bash
-  az account show --query user.name -o tsv
-  ```
-- **`connectorNamespaceIdentityType` infrastructure parameter:** Enter `SystemAssigned` for the default Connector Namespace managed identity, or `UserAssigned` to create and attach a user-assigned managed identity.
-
-The `deployerLoginName` value is used to create the Azure SQL Database server with Microsoft Entra ID-only authentication and set you as the SQL admin.
-
-### Optional: use a user-assigned managed identity
-
-When `azd up` prompts for `connectorNamespaceIdentityType`, enter `UserAssigned` to test with a user-assigned managed identity.
-
-When set to `UserAssigned`, the template creates a user-assigned managed identity, attaches it to the Connector Namespace, passes its client ID to the hosted MCP server, and grants that identity access to Azure SQL Database.
-
-Choose the identity type before the first deployment. Connector Namespace doesn't allow changing attached user-assigned identities after the namespace is created. To switch between `SystemAssigned` and `UserAssigned`, create a new azd environment or run `azd down --purge` and deploy again.
-
-For more information about managed identity options in Azure Connector Namespace, see [Hosted MCP servers in Azure Connector Namespace](https://learn.microsoft.com/azure/logic-apps/connector-namespace/connector-namespace-hosted-mcp).
-
-### Connect from Visual Studio Code
-
-After `azd up` completes, the MCP endpoint URL is printed. Add it to VS Code using the UI. For full details, see the [VS Code MCP servers documentation](https://code.visualstudio.com/docs/copilot/chat/mcp-servers).
-
-1. In VS Code, open the Command Palette:
-   - Windows/Linux: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>
-   - macOS: <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>
-1. Run **MCP: Add Server**.
-1. Choose **HTTP** as the server type.
-1. Paste the MCP endpoint URL printed by `azd up`.
-1. Enter a server name, for example `sql-mcp`.
-1. Choose whether to save the server in user settings or workspace settings.
-1. Start the `sql-mcp` server when VS Code prompts you.
-
-VS Code prompts you to sign in with Microsoft.
-
-### Try it out
-
-Once the MCP server is connected in VS Code, open Copilot Chat (Agent mode) and try prompts like:
-
-- *"List the blog posts in the database."*
-- *"What tables are available?"*
-- *"Show me the blog post from the .NET Blog."*
-
-Copilot uses the MCP tools (`describe_entities`, `read_records`) exposed by Data API builder to query Azure SQL Database and return results.
-
-<a name=sample-details></a>
-
-## Sample details
-
-### Architecture
-
-```mermaid
-graph TB
-    Client["VS Code / Copilot / MCP Client"]
-    Client -->|"MCP (HTTP + SSE)"| CN
-    subgraph CN["Connector Namespace"]
-        MCP["Hosted MCP Server\n(Data API builder)"]
-    end
-    MCP -->|"Managed Identity"| SQL[("Azure SQL Database")]
+```text
+Server=tcp:orders-sql.database.windows.net,1433;Database=Orders;Authentication=Active Directory Managed Identity;User Id=__SQL_IDENTITY_CLIENT_ID__;Encrypt=True;TrustServerCertificate=False;
 ```
 
-### Resources deployed
+The template substitutes `__SQL_IDENTITY_CLIENT_ID__` with the new identity's client ID. For **SystemAssigned**, omit the entire `User Id` setting. Use managed identity against a SQL VM only if that server's Entra authentication and external login are already configured; Arc enrollment by itself is insufficient.
 
-| Resource | Purpose |
-|----------|---------|
-| **Resource Group** | Logical container for all deployed resources |
-| **Azure SQL Database logical server** | Microsoft Entra ID-only authentication, with you as the server admin |
-| **Azure SQL Database** | Basic SKU database with a seeded `dbo.BlogPosts` sample table used by the MCP server |
-| **SQL Firewall Rules** | Allows Azure services/resources, Azure Portal Query Editor, and your public IP for setup |
-| **Log Analytics Workspace** | Stores Application Insights telemetry |
-| **Application Insights** | Collects telemetry from the hosted MCP server |
-| **Connector Namespace** | Hosts MCP servers with system-assigned managed identity by default, or user-assigned managed identity when configured |
-| **Hosted MCP server** | Data API builder MCP server configuration deployed to the Connector Namespace |
-| **MCP Access Policy** | Grants you access to invoke MCP tools |
+**Dedicated SQL login (Azure SQL where allowed, SQL VM or on-premises candidate):**
 
-Resource names use the pattern `<type>-<environment-name>-<short-suffix>` where possible, for example `sql-mcp-dev-a1b2c3d4`. The suffix is deterministic for the subscription, environment name, and location so names are readable and stable across redeployments.
-
-### What `azd up` does
-
-| Step | Action |
-|------|--------|
-| **Provision** | Deploys Azure SQL Database, SQL firewall rules, Log Analytics, Application Insights, Connector Namespace, hosted MCP server, and MCP access policy. |
-| **Post-provision** | Allows your public IP through the SQL firewall, creates and seeds `dbo.BlogPosts`, creates the Connector Namespace managed identity SQL user, grants SQL permissions, generates `dab-config.generated.json`, and prints the MCP endpoint plus Azure Portal resource group link. |
-
-The hosted MCP server receives:
-
-- the included `dab-config.json` (the Data API builder configuration file) as `properties.hostedMcpServer.configuration.configFile`
-- the generated connection string as `SQL_CONNECTION_STRING`
-- the Application Insights connection string as `APPLICATIONINSIGHTS_CONNECTION_STRING`
-- `AZURE_CLIENT_ID` when the sample is configured to use a user-assigned managed identity
-
-No database or Application Insights connection strings are checked in.
-
-This sample includes a ready-to-use `dab-config.json`, the Data API builder configuration file that defines which database entities are exposed through MCP tools. If you want to create or customize a Data API builder configuration from scratch, install the DAB CLI and use it to generate a config file. For more information, see [Install the Data API builder CLI](https://learn.microsoft.com/azure/data-api-builder/command-line/install).
-
-For details about the hosted MCP server resource model and supported server types, see [Hosted MCP servers in Azure Connector Namespace](https://learn.microsoft.com/azure/logic-apps/connector-namespace/connector-namespace-hosted-mcp). For a walkthrough focused on the Azure SQL Database hosted MCP server, see [Hosted MCP server quickstart for SQL](https://learn.microsoft.com/azure/logic-apps/connector-namespace/hosted-mcp-quickstart?pivots=sql).
-
-### Inspect resources in Azure Portal
-
-After deployment, the post-provision output includes a link to the Azure resource group in the Azure Portal. Use that page to inspect the Azure SQL Database logical server, Application Insights resource, Log Analytics workspace, Connector Namespace, and hosted MCP server.
-
-To allow additional users to connect to the MCP server:
-
-1. Open the deployed **Connector Namespace** resource in the Azure Portal.
-1. Open the hosted MCP server configuration, for example `sql-mcp`.
-1. Add an access policy for each additional user or group that should be allowed to invoke the MCP server.
-
-### Sample data
-
-The post-provision hook creates and seeds `dbo.BlogPosts` with these entries:
-
-| Title | Source |
-|-------|--------|
-| Hosted MCP servers in Azure Connector Namespace | Microsoft Learn |
-| Durable Workflows in Microsoft Agent Framework | .NET Blog |
-
-### SQL firewall access
-
-The deployment configures two SQL firewall paths:
-
-| Rule | When | Purpose |
-|------|------|---------|
-| `AllowAzureServices` | During Bicep provisioning | Allows Azure services/resources, including Azure Portal Query Editor, to reach the SQL server. |
-| `AllowDeployerIp` | During post-provision | Detects your current public IP and allows your local machine to seed and query the database. |
-
-If SQL reports a different blocked client IP during post-provision, the script adds that IP and retries.
-
-<a name=clean-up></a>
-
-## Clean up
-
-Using azd:
-
-```bash
-azd down --purge
+```text
+Server=tcp:sql01.contoso.com,1433;Database=Orders;User ID=sre_mcp_reader;Password="<reader-password>";Encrypt=True;TrustServerCertificate=False;
 ```
 
-Or with Azure CLI:
+Use SqlClient connection-string quoting for passwords containing delimiters; do not paste a password into shared documentation or shell arguments. SQL-login mode does not use the namespace identity for SQL, though the namespace still has an identity for hosting.
 
-```bash
-# Replace <environment-name> with your azd environment name.
-az group delete --name rg-<environment-name> --yes --no-wait
+**Secrets:** `sqlConnectionString` is an ARM secure parameter and is never a deployment output. It is passed to hosted MCP configuration. Treat that resource configuration and local `.azure` environment state as sensitive: limit Azure read access and file access, do not commit or publish them, and follow your credential-rotation policy. Base64 configuration is not encryption. A new secure parameter can prompt again on redeployment; supply it through an approved secret process.
 
-# Optional: remove the subscription-scope deployment record.
-az deployment sub delete --name <environment-name>
+The PowerShell alternative, `./deploy.ps1 -EnvironmentName mcp-existing-sql`, invokes the same azd flow; it does not run an independent SQL provisioning path.
+
+### Resources created
+
+Dedicated resource group, Log Analytics, Application Insights, Connector Namespace, optional user-assigned identity, hosted `mcp-sql` config, and a deployer MCP access policy. **No `Microsoft.Sql/*`, Arc or network resources are deployed.** SQL need not live in the hosting resource group/subscription.
+
+Deployment prints the MCP endpoint and SQL identity name/object ID. **Host deployment is not proof of SQL connectivity or grants.** The post-provision hook only reports outputs; it does not run SQL or generate a secret-bearing DAB file.
+
+## 3. Authorize the reader and verify
+
+Your DBA must review the DAB entities and authorize the selected reader in the existing target database. No automatic administrator access, `db_datareader`/`db_datawriter` membership or database-wide grants are applied.
+
+For Azure SQL managed identity, connect as an appropriately authorized administrator **to the target database**, replacing the names below with the `SQL_IDENTITY_NAME` output and an existing approved object:
+
+```sql
+CREATE USER [<SQL_IDENTITY_NAME>] FROM EXTERNAL PROVIDER;
+GRANT SELECT, VIEW DEFINITION ON OBJECT::[reporting].[OrderStatus]
+    TO [<SQL_IDENTITY_NAME>];
 ```
 
-<a name=related-links></a>
+These are examples, not automatically executed commands. If a user already exists, verify its identity rather than recreating or repurposing it. Name resolution can require directory permissions for the SQL server identity; follow [Azure SQL managed identity guidance](https://learn.microsoft.com/azure/azure-sql/database/authentication-azure-ad-user-assigned-managed-identity). For the default `sys.tables` entity, metadata visibility follows the reader's permissions on existing objects; there is no blanket metadata grant in this sample.
 
-## Related links
+For SQL-login mode, have the DBA provision a dedicated login and matching database user, then grant access only to the configured objects. For SQL Server Entra mode, the DBA must provision the external server login/database user using that server's supported configuration. Neither of these is created by the template.
 
-- [Hosted MCP servers in Azure Connector Namespace](https://learn.microsoft.com/azure/logic-apps/connector-namespace/connector-namespace-hosted-mcp)
-- [Hosted MCP server quickstart for Azure SQL Database](https://learn.microsoft.com/azure/logic-apps/connector-namespace/hosted-mcp-quickstart?pivots=sql)
-- [Azure SQL Database MCP server support in Data API builder](https://learn.microsoft.com/azure/data-api-builder/mcp/overview)
-- [Install the Data API builder CLI](https://learn.microsoft.com/azure/data-api-builder/command-line/install)
-- [Connector Namespace overview](https://learn.microsoft.com/azure/logic-apps/connector-namespace/connector-namespace-overview)
-- [Azure Developer CLI](https://learn.microsoft.com/azure/developer/azure-developer-cli/)
+Optional smoke test from VS Code: **MCP: Add Server > HTTP**, enter `MCP_ENDPOINT_URL`, start it and complete Microsoft sign-in using the authorized deployer account. Invoke `describe_entities`, then read one approved entity using `read_records`. Check the expected database data; empty metadata results are not proof of cross-session diagnostic visibility. Confirm that write tools are absent. Failures require correcting identity, SQL permissions, config, TLS or network access; do not broaden permissions to make a test pass.
+
+## 4. Connect Azure SRE Agent
+
+In the SRE Agent portal, **Builder > Connectors > Add connector > MCP server**, use:
+
+| Setting | Value |
+|---|---|
+| Connection type | Streamable HTTP |
+| URI | `MCP_ENDPOINT_URL` from deployment |
+| Authentication | Managed identity |
+| Microsoft Entra token scope | `https://apihub.azure.com/.default` |
+
+Before testing, find the **SRE connector's managed identity** in Azure and copy its tenant ID and principal/object ID. In [Connector Namespace](https://connectors.azure.com), open your namespace, select **MCP Connectors > sql-mcp > Access Policies > Add Access Policy**, and authorize that tenant/principal. This inbound identity is separate from the hosted server's SQL reader identity.
+
+Return to SRE Agent, test the connection, select read-only tools, add the connector and wait for **Connected**. Ask:
+
+> Discover my SQL connector's configured entities and read the approved entity. Do not modify SQL. Explain when evidence or permissions are insufficient.
+
+Connector Namespace hosts DAB; DAB's configuration specifies the existing SQL objects; SQL grants restrict downstream access. There is no arbitrary-SQL troubleshooting tool or automatic remediation in this sample.
+
+## Cleanup and validation
+
+`azd down --purge` removes the dedicated hosting resources, **not the existing SQL database**. Verify scope before deleting: never add existing SQL/shared resources to the sample resource group. DBA-managed users and grants remain and need separate DBA review.
+
+Local checks compile Bicep and verify no SQL provisioning, secure connection handling, read-only config and reporting-only hooks. Run `python -m unittest discover -s tests` from this directory (Python 3 and Azure CLI/Bicep required). Hosted deployment and existing Azure SQL/VM/on-premises runtime combinations have **not** been tested by this fork. SQL readiness must be verified in your environment.
+
+## References
+
+- [Azure SDK Blog walkthrough](https://devblogs.microsoft.com/azure-sdk/power-azure-sre-agent-with-connector-namespace/)
+- [Connector Namespace hosted servers and preview limitations](https://learn.microsoft.com/azure/connector-namespace/connector-namespace-hosted-mcp)
+- [SQL MCP / Data API builder](https://learn.microsoft.com/azure/data-api-builder/mcp/overview)
+- [Configure DAB entities](https://learn.microsoft.com/azure/data-api-builder/configuration/entities)
+- [SRE Agent MCP connectors](https://learn.microsoft.com/azure/sre-agent/mcp-connector)

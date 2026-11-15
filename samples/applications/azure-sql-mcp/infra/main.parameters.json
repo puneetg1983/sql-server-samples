@@ -7,9 +7,6 @@
     },
     "location": {
       "value": "${AZURE_LOCATION}"
-    },
-    "deployerLoginName": {
-      "value": "${AZURE_DEPLOYER_LOGIN}"
     }
   }
 }

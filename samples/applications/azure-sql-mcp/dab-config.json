@@ -20,7 +20,15 @@
     },
     "mcp": {
       "enabled": true,
-      "path": "/mcp"
+      "path": "/mcp",
+      "dml-tools": {
+        "describe-entities": true,
+        "read-records": true,
+        "create-record": false,
+        "update-record": false,
+        "delete-record": false,
+        "execute-entity": false
+      }
     },
     "host": {
       "cors": {
@@ -30,31 +38,22 @@
       "authentication": {
         "provider": "AppService"
       },
-      "mode": "development"
+      "mode": "production"
     }
   },
   "entities": {
-    "BlogPosts": {
+    "Tables": {
       "source": {
-        "object": "dbo.BlogPosts",
-        "type": "table"
-      },
-      "graphql": {
-        "enabled": true,
-        "type": {
-          "singular": "BlogPosts",
-          "plural": "BlogPosts"
-        }
-      },
-      "rest": {
-        "enabled": true
+        "object": "sys.tables",
+        "type": "view",
+        "key-fields": ["object_id"]
       },
       "permissions": [
         {
           "role": "anonymous",
           "actions": [
             {
-              "action": "*"
+              "action": "read"
             }
           ]
         }

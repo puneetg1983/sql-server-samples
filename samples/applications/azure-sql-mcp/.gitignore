@@ -1,3 +1,5 @@
 .azure/
 dab-config.generated.json
 infra/main.json
+tests/__pycache__/
+tests/.output/

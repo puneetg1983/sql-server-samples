@@ -9,7 +9,7 @@ targetScope = 'subscription'
 @description('Name of the environment (used to generate unique resource names).')
 param environmentName string
 
-@description('Primary location for SQL and other resources.')
+@description('Location for hosting and monitoring resources, not the existing SQL server.')
 @metadata({
   azd: {
     type: 'location'
@@ -20,7 +20,7 @@ param location string
 @description('Location for the Connector Namespace. Preview regions: westcentralus, eastasia, centralus, northeurope.')
 param connectorNamespaceLocation string = location
 
-@description('Object ID of the deployer user. Used as Entra admin for SQL and for access policies.')
+@description('Object ID of the deployer user. Used only for the MCP access policy, not SQL administration.')
 @metadata({
   azd: {
     type: 'principalId'
@@ -28,21 +28,17 @@ param connectorNamespaceLocation string = location
 })
 param deployerPrincipalId string = deployer().objectId
 
-@description('Login name (email) of the deployer user for SQL Entra admin.')
-param deployerLoginName string
-
-@description('Name of the SQL Database to create.')
-param databaseName string = 'mcpdb'
-
-@description('Optional public IP address to allow through the SQL firewall. The azd post-provision hook also configures this for local setup.')
-param deployerIpAddress string = ''
+@secure()
+@minLength(1)
+@description('Existing SQL connection string. Use TLS with certificate validation and a dedicated reader. For user-assigned managed identity, use User Id=__SQL_IDENTITY_CLIENT_ID__; the template replaces that placeholder.')
+param sqlConnectionString string
 
 @allowed([
   'SystemAssigned'
   'UserAssigned'
 ])
 @description('Managed identity type for the Connector Namespace and hosted SQL MCP server.')
-param connectorNamespaceIdentityType string
+param connectorNamespaceIdentityType string = 'UserAssigned'
 
 // ---------------------------------------------------------------------------
 // Variables
@@ -52,7 +48,6 @@ var readableEnvironmentName = take(toLower(replace(replace(replace(environmentNa
 var resourceToken = take(toLower(uniqueString(subscription().id, environmentName, location)), 8)
 var tags = { 'azd-env-name': environmentName }
 var resourceGroupName = 'rg-${readableEnvironmentName}'
-var sqlServerName = 'sql-${readableEnvironmentName}-${resourceToken}'
 var connectorNamespaceName = 'cn-${readableEnvironmentName}-${resourceToken}'
 var userAssignedIdentityName = 'id-${readableEnvironmentName}-${resourceToken}'
 var logAnalyticsWorkspaceName = 'log-${readableEnvironmentName}-${resourceToken}'
@@ -73,24 +68,6 @@ resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
 }
 
 // ---------------------------------------------------------------------------
-// Azure SQL Server + Database
-// ---------------------------------------------------------------------------
-
-module sql './modules/sql.bicep' = {
-  scope: rg
-  name: 'sql-${resourceToken}'
-  params: {
-    sqlServerName: sqlServerName
-    databaseName: databaseName
-    location: location
-    tags: tags
-    entraAdminObjectId: deployerPrincipalId
-    entraAdminLogin: deployerLoginName
-    deployerIpAddress: deployerIpAddress
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Application Insights
 // ---------------------------------------------------------------------------
 
@@ -100,7 +77,7 @@ module appInsights './modules/appInsights.bicep' = {
   params: {
     workspaceName: logAnalyticsWorkspaceName
     appInsightsName: appInsightsName
-    location: 'southcentralus' // TODO: revert to `location` after testing
+    location: location
     tags: tags
   }
 }
@@ -131,16 +108,14 @@ module connectorNamespace './modules/connectorNamespace.bicep' = {
     location: connectorNamespaceLocation
     tags: tags
     identityType: connectorNamespaceIdentityType
-    userAssignedIdentityResourceId: useUserAssignedIdentity ? userAssignedIdentity.outputs.id : ''
+    userAssignedIdentityResourceId: useUserAssignedIdentity ? userAssignedIdentity!.outputs.id : ''
   }
 }
 
-var managedIdentityClientId = useUserAssignedIdentity ? userAssignedIdentity.outputs.clientId : ''
-var sqlIdentityName = useUserAssignedIdentity ? userAssignedIdentity.outputs.name : connectorNamespace.outputs.name
-var sqlIdentityPrincipalId = useUserAssignedIdentity ? userAssignedIdentity.outputs.principalId : connectorNamespace.outputs.principalId
-var dabConnectionString = useUserAssignedIdentity
-  ? 'Server=${sql.outputs.sqlServerFqdn};Database=${databaseName};Authentication=Active Directory Managed Identity;User Id=${managedIdentityClientId};Encrypt=True;TrustServerCertificate=False;'
-  : 'Server=${sql.outputs.sqlServerFqdn};Database=${databaseName};Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;'
+var managedIdentityClientId = useUserAssignedIdentity ? userAssignedIdentity!.outputs.clientId : ''
+var sqlIdentityName = useUserAssignedIdentity ? userAssignedIdentity!.outputs.name : connectorNamespace.outputs.name
+var sqlIdentityPrincipalId = useUserAssignedIdentity ? userAssignedIdentity!.outputs.principalId : connectorNamespace.outputs.principalId
+var dabConnectionString = replace(sqlConnectionString, '__SQL_IDENTITY_CLIENT_ID__', managedIdentityClientId)
 
 // ---------------------------------------------------------------------------
 // Hosted SQL MCP Server + Access Policy
@@ -170,25 +145,16 @@ module hostedMcpServer './modules/hostedMcpServer.bicep' = {
 @description('The name of the resource group.')
 output RESOURCE_GROUP_NAME string = rg.name
 
-@description('The name of the SQL Server.')
-output SQL_SERVER_NAME string = sql.outputs.sqlServerName
-
-@description('The fully qualified domain name of the SQL Server.')
-output SQL_SERVER_FQDN string = sql.outputs.sqlServerFqdn
-
-@description('The name of the SQL Database.')
-output SQL_DATABASE_NAME string = sql.outputs.databaseName
-
 @description('The name of the Connector Namespace.')
 output CONNECTOR_NAMESPACE_NAME string = connectorNamespace.outputs.name
 
 @description('The principal ID of the Connector Namespace system-assigned managed identity. Empty when using user-assigned identity only.')
 output CONNECTOR_NAMESPACE_PRINCIPAL_ID string = connectorNamespace.outputs.principalId
 
-@description('The managed identity name granted access to Azure SQL.')
+@description('Managed identity name. A DBA must authorize it separately if using managed-identity SQL authentication.')
 output SQL_IDENTITY_NAME string = sqlIdentityName
 
-@description('The managed identity principal ID granted access to Azure SQL.')
+@description('Managed identity principal ID for DBA authorization; no SQL grants are applied by deployment.')
 output SQL_IDENTITY_PRINCIPAL_ID string = sqlIdentityPrincipalId
 
 @description('The managed identity client ID used by the hosted MCP server. Empty when using system-assigned identity.')
@@ -199,9 +165,6 @@ output APPLICATIONINSIGHTS_NAME string = appInsights.outputs.appInsightsName
 
 @description('The name of the Log Analytics workspace backing Application Insights.')
 output LOG_ANALYTICS_WORKSPACE_NAME string = appInsights.outputs.workspaceName
-
-@description('Connection string for DAB config.')
-output DAB_CONNECTION_STRING string = dabConnectionString
 
 @description('MCP endpoint URL — point VS Code / MCP clients here.')
 output MCP_ENDPOINT_URL string = hostedMcpServer.outputs.mcpEndpointUrl
